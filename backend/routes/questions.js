@@ -1,5 +1,6 @@
 import express from "express";
 import Question from "../models/questionModels.js";
+import { generateQuestion } from "../utils/gemini.js";
 
 const router = express.Router();
 
@@ -79,24 +80,24 @@ router.get("/populate", async (req, res) => {
           },
         ],
         starterCode: `function twoSum(nums, target) {
-    // Your code here
-    // Return indices of two numbers that add up to target
-}`,
+              // Your code here
+              // Return indices of two numbers that add up to target
+          }`,
         hints: [
           "Use a hash map to store numbers and their indices",
           "Check if complement (target - current) exists in the map",
         ],
         solution: `function twoSum(nums, target) {
-    const map = new Map();
-    for (let i = 0; i < nums.length; i++) {
-        const complement = target - nums[i];
-        if (map.has(complement)) {
-            return [map.get(complement), i];
-        }
-        map.set(nums[i], i);
-    }
-    return [];
-}`,
+                        const map = new Map();
+                        for (let i = 0; i < nums.length; i++) {
+                            const complement = target - nums[i];
+                            if (map.has(complement)) {
+                                return [map.get(complement), i];
+                            }
+                            map.set(nums[i], i);
+                        }
+                        return [];
+                    }`,
       },
       {
         title: "Reverse String",
@@ -119,23 +120,23 @@ router.get("/populate", async (req, res) => {
           },
         ],
         starterCode: `function reverseString(s) {
-    // Your code here
-    // Reverse the string in-place
-}`,
+                // Your code here
+                // Reverse the string in-place
+            }`,
         hints: [
           "Use two pointers approach",
           "Swap characters from start and end moving towards center",
         ],
         solution: `function reverseString(s) {
-    let left = 0;
-    let right = s.length - 1;
-    while (left < right) {
-        [s[left], s[right]] = [s[right], s[left]];
-        left++;
-        right--;
-    }
-    return s;
-}`,
+                        let left = 0;
+                        let right = s.length - 1;
+                        while (left < right) {
+                            [s[left], s[right]] = [s[right], s[left]];
+                            left++;
+                            right--;
+                        }
+                        return s;
+                    }`,
       },
       {
         title: "Tell me about yourself",
@@ -168,6 +169,36 @@ router.get("/populate", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error adding questions to database",
+    });
+  }
+});
+
+router.post("/generate", async (req, res) => {
+  try {
+    const { difficulty, topic } = req.body;
+
+    // Call Gemini
+    const questionData = await generateQuestion(difficulty, topic);
+
+    if (!questionData) {
+      return res.status(500).json({
+        success: false,
+        message: "Failed to generate question from AI",
+      });
+    }
+
+    // Save to Database so it has an _id
+    const newQuestion = await Question.create(questionData);
+
+    res.status(201).json({
+      success: true,
+      data: newQuestion,
+    });
+  } catch (error) {
+    console.error("Route Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error during generation",
     });
   }
 });

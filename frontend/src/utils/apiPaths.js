@@ -16,12 +16,11 @@ export const API_PATHS = {
         CODING: '/api/questions/coding',
         BEHAVIORAL: '/api/questions/behavioral',
         ALL: '/api/questions',
-        POPULATE: '/api/questions/populate'
+        POPULATE: '/api/questions/populate',
+        GENERATE: '/api/questions/generate'
     },
     DASHBOARD: {
         STATS: '/api/dashboard/stats',
         HISTORY: '/api/dashboard/history'
     }
 };
-
-

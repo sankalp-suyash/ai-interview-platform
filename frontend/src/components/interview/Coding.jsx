@@ -1,19 +1,16 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
 import { oneDark } from '@codemirror/theme-one-dark';
-import { Play, Check, Clock, AlertCircle, ArrowRight, Zap, Code, FileText, User, Repeat } from 'lucide-react';
-import { useAuth } from '../../context/AuthContext';
+import { Play, Check, Clock, AlertCircle, ArrowRight, Zap, Code, User } from 'lucide-react';
 import axiosInstance from '../../utils/axiosInstance';
 import { API_PATHS } from '../../utils/apiPaths';
 import { useNavigate } from 'react-router-dom';
 
 const Coding = () => {
-  const { user } = useAuth();
   const navigate = useNavigate();
 
   // State for interview flow
-  const [questions, setQuestions] = useState([]);
   const [currentQuestion, setCurrentQuestion] = useState(null);
   const [interviewStarted, setInterviewStarted] = useState(false);
 
@@ -23,55 +20,38 @@ const Coding = () => {
   const [interviewId, setInterviewId] = useState(null);
 
   // State for loading and timing
-  const [isLoading, setIsLoading] = useState(true); // Default to true to load questions first
+  const [isLoading, setIsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRunning, setIsRunning] = useState(false)
   const [timeElapsed, setTimeElapsed] = useState(0);
-
-  // --- Data Fetching ---
-
-  const fetchQuestions = useCallback(async () => {
-    try {
-      // NOTE: Your backend needs questions populated via /api/questions/populate
-      const response = await axiosInstance.get(API_PATHS.QUESTIONS.CODING);
-      if (response.data.success && response.data.data.length > 0) {
-        setQuestions(response.data.data);
-      } else {
-        alert('No coding questions found in the database. Please run /api/questions/populate.');
-      }
-    } catch (error) {
-      console.error('Error fetching questions:', error);
-      alert('Failed to load questions. Check backend connection and populate route.');
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchQuestions();
-  }, [fetchQuestions]);
 
   // --- Interview Logic ---
 
   const startInterview = async () => {
-    if (questions.length === 0) {
-      alert('No questions available. Please wait or check database population.');
-      return;
-    }
-
     setIsLoading(true);
     try {
-      // 1. Pick a random question that now has a MongoDB ObjectId
-      const randomQuestion = questions[Math.floor(Math.random() * questions.length)];
+      // 1. GENERATE QUESTION FROM AI
+      // You can make these variables dynamic based on user selection later
+      const generateResponse = await axiosInstance.post(API_PATHS.QUESTIONS.GENERATE, {
+        difficulty: 'Medium',
+        topic: 'Arrays'
+      });
+
+      if (!generateResponse.data.success) {
+        throw new Error('Failed to generate question');
+      }
+
+      const newQuestion = generateResponse.data.data;
 
       // 2. Track interview start
       const trackResponse = await axiosInstance.post(API_PATHS.INTERVIEWS.TRACK, {
         type: 'coding',
-        questionId: randomQuestion._id // <<-- FIX: Sending the correct MongoDB ObjectId
+        questionId: newQuestion._id
       });
 
       setInterviewId(trackResponse.data.data._id);
-      setCurrentQuestion(randomQuestion);
-      setCode(randomQuestion.starterCode || function solution() { /* Write your code here */ });
+      setCurrentQuestion(newQuestion);
+      setCode(newQuestion.starterCode || `// Write your solution for: ${newQuestion.title}\n\nfunction solution() {\n  \n}`);
       setInterviewStarted(true);
       setTimeElapsed(0); // Reset time when starting
       setResults(null);
@@ -109,42 +89,68 @@ const Coding = () => {
 
   // --- Code Execution (Mock) ---
 
-  const handleRunCode = () => {
+  // --- Code Execution (Mock) ---
+
+  const handleRunCode = async () => { // Make async to handle UI delay
     if (!currentQuestion) return;
 
-    try {
-      // This is a basic mock execution using Function()
-      const funcName = currentQuestion.starterCode.match(/function\s+(\w+)\s*\(/)?.[1] || 'solution';
+    console.log("🚀 Run Code clicked. Compiling..."); // Debug log
+    setIsRunning(true); // Start loading spinner
+    setResults(null);   // Clear previous results briefly to show a "refresh"
 
+    // standard execution logic wrapped in a promise to allow UI update
+    await new Promise(resolve => setTimeout(resolve, 600));
+
+    try {
+      const starterCode = currentQuestion.starterCode || '';
+      const funcNameMatch = starterCode.match(/function\s+(\w+)/);
+      const funcName = funcNameMatch ? funcNameMatch[1] : 'solution';
+      const argsMatch = starterCode.match(/\(([^)]*)\)/);
+      const args = argsMatch ? argsMatch[1] : '';
+
+      console.log("📝 Function Name:", funcName);
+
+      // eslint-disable-next-line no-new-func
       const userFunction = new Function(
-        // Extract arguments from starter code signature (e.g., 'nums', 'target')
-        // Using a generalized approach since questions are now dynamic
-        'return function ' + currentQuestion.starterCode.substring(currentQuestion.starterCode.indexOf('(') + 1, currentQuestion.starterCode.indexOf(')')) + ' { ' + code + ' return ' + funcName + '(' + currentQuestion.starterCode.substring(currentQuestion.starterCode.indexOf('(') + 1, currentQuestion.starterCode.indexOf(')')) + '); }'
+        `return function ${funcName}(${args}) { ${code} return ${funcName}(${args}); }`
       )();
 
-      // Mock test cases for two sum / reverse string based on title
-      const testCases = currentQuestion.title === 'Two Sum' ? [
-        { args: [[2, 7, 11, 15], 9], expected: [0, 1] },
-      ] : currentQuestion.title === 'Reverse String' ? [
-        { args: ['hello'], expected: 'olleh' },
-      ] : [];
+      const testCases = currentQuestion.testCases || [];
 
       const testResults = testCases.map((testCase, index) => {
         try {
-          const result = userFunction(...testCase.args);
-          const passed = JSON.stringify(result) === JSON.stringify(testCase.expected);
+          let parsedArgs;
+          try {
+            if (testCase.input.startsWith('[')) {
+              parsedArgs = JSON.parse(`[${testCase.input}]`);
+            } else {
+              const cleanedInput = testCase.input.replace(/\w+\s*=\s*/g, '');
+              parsedArgs = JSON.parse(`[${cleanedInput}]`);
+            }
+          } catch (e) {
+            console.warn("Could not parse args automatically", testCase.input);
+            parsedArgs = [];
+          }
+
+          const result = userFunction(...parsedArgs);
+
+          console.log(`Test ${index + 1}: Expected ${testCase.output} vs Got ${result}`); // Debug log
+
+          const passed = JSON.stringify(result) === JSON.stringify(testCase.output) ||
+            String(result) === String(testCase.output);
+
           return {
             testCase: index + 1,
-            input: JSON.stringify(testCase.args),
-            expected: JSON.stringify(testCase.expected),
-            output: JSON.stringify(result),
+            input: testCase.input,
+            expected: typeof testCase.output === 'object' ? JSON.stringify(testCase.output) : testCase.output,
+            output: typeof result === 'object' ? JSON.stringify(result) : String(result),
             passed
           };
         } catch (error) {
           return {
             testCase: index + 1,
-            input: JSON.stringify(testCase.args),
-            expected: JSON.stringify(testCase.expected),
+            input: testCase.input,
+            expected: String(testCase.output),
             output: 'Runtime Error: ' + error.message,
             passed: false
           };
@@ -154,13 +160,19 @@ const Coding = () => {
       setResults({
         type: 'test',
         data: testResults,
-        passed: testResults.every(test => test.passed)
+        passed: testResults.length > 0 && testResults.every(test => test.passed)
       });
+
+      console.log("✅ Execution Complete. Results updated.");
+
     } catch (error) {
+      console.error("❌ Runtime Error:", error);
       setResults({
         type: 'error',
         message: 'Code compilation failed: ' + error.message
       });
+    } finally {
+      setIsRunning(false); // Stop loading spinner
     }
   };
 
@@ -171,9 +183,9 @@ const Coding = () => {
     setIsSubmitting(true);
     try {
       // 1. Run final tests (optional)
-      handleRunCode(); // Run tests before submitting
+      handleRunCode();
 
-      // 2. Simulate AI evaluation (backend will handle this in future phase)
+      // 2. Simulate AI evaluation 
       const evaluation = {
         score: Math.floor(Math.random() * 30) + 70,
         feedback: {
@@ -192,7 +204,7 @@ const Coding = () => {
 
       setResults({ type: 'evaluation', data: evaluation });
 
-      // 3. Mark interview as completed (real API call)
+      // 3. Mark interview as completed 
       if (interviewId) {
         await axiosInstance.put(API_PATHS.INTERVIEWS.COMPLETE.replace(':id', interviewId), {
           score: evaluation.score,
@@ -211,14 +223,6 @@ const Coding = () => {
 
   // --- Conditional Renders ---
 
-  if (isLoading) {
-    return (
-      <div className="flex justify-center items-center h-64">
-        <div className="text-lg text-gray-600">Loading questions...</div>
-      </div>
-    );
-  }
-
   // Start Screen
   if (!interviewStarted) {
     return (
@@ -229,10 +233,10 @@ const Coding = () => {
               <Code className="w-8 h-8 text-white" />
             </div>
             <h1 className="text-3xl font-bold text-white mb-4">
-              Start Coding Interview
+              AI Coding Interview
             </h1>
             <p className="text-gray-300 text-lg">
-              Practice your coding skills with real interview questions and get AI-powered feedback.
+              Click start to generate a unique coding problem using Gemini AI.
             </p>
           </div>
 
@@ -240,17 +244,17 @@ const Coding = () => {
             <div className="bg-gray-700 rounded-xl p-6 text-center">
               <Clock className="w-8 h-8 text-amber-400 mx-auto mb-3" />
               <h3 className="font-semibold text-white mb-2">45 Minutes</h3>
-              <p className="text-gray-400 text-sm">Typical interview duration</p>
+              <p className="text-gray-400 text-sm">Typical duration</p>
             </div>
             <div className="bg-gray-700 rounded-xl p-6 text-center">
-              <FileText className="w-8 h-8 text-amber-400 mx-auto mb-3" />
-              <h3 className="font-semibold text-white mb-2">{questions.length} Questions Ready</h3>
-              <p className="text-gray-400 text-sm">One randomly selected</p>
+              <Zap className="w-8 h-8 text-amber-400 mx-auto mb-3" />
+              <h3 className="font-semibold text-white mb-2">Live AI</h3>
+              <p className="text-gray-400 text-sm">Generative Questions</p>
             </div>
             <div className="bg-gray-700 rounded-xl p-6 text-center">
               <User className="w-8 h-8 text-amber-400 mx-auto mb-3" />
-              <h3 className="font-semibold text-white mb-2">AI Evaluation</h3>
-              <p className="text-gray-400 text-sm">Instant detailed feedback</p>
+              <h3 className="font-semibold text-white mb-2">Feedback</h3>
+              <p className="text-gray-400 text-sm">Instant Analysis</p>
             </div>
           </div>
 
@@ -260,7 +264,7 @@ const Coding = () => {
               Important
             </h3>
             <p className="text-amber-200 text-sm">
-              This will use 1 of your 2 weekly coding interviews. Make sure you're ready to start!
+              This will use 1 of your 2 weekly coding interviews.
             </p>
           </div>
 
@@ -273,13 +277,13 @@ const Coding = () => {
             </button>
             <button
               onClick={startInterview}
-              disabled={isLoading || questions.length === 0}
+              disabled={isLoading}
               className="flex-1 px-6 py-4 bg-amber-500 text-white rounded-xl font-semibold hover:bg-amber-600 disabled:opacity-50 transition-colors flex items-center justify-center"
             >
               {isLoading ? (
                 <>
                   <Zap className="w-5 h-5 mr-2 animate-spin" />
-                  Starting Interview...
+                  Generating...
                 </>
               ) : (
                 <>
@@ -307,7 +311,7 @@ const Coding = () => {
               <span>{formatTime(timeElapsed)}</span>
             </div>
             <div className={`px-2 py-1 rounded text-xs font-semibold ${currentQuestion?.difficulty === 'Easy' ? 'bg-green-500' :
-                currentQuestion?.difficulty === 'Medium' ? 'bg-yellow-500' : 'bg-red-500'
+              currentQuestion?.difficulty === 'Medium' ? 'bg-yellow-500' : 'bg-red-500'
               }`}>
               {currentQuestion?.difficulty}
             </div>
@@ -315,10 +319,21 @@ const Coding = () => {
           <div className="flex items-center space-x-3">
             <button
               onClick={handleRunCode}
-              className="flex items-center px-4 py-2 bg-amber-500 rounded-lg font-semibold hover:bg-amber-600 transition-colors"
+              disabled={isRunning || isSubmitting} // Disable while running
+              className={`flex items-center px-4 py-2 rounded-lg font-semibold transition-colors ${isRunning ? 'bg-amber-600 cursor-not-allowed' : 'bg-amber-500 hover:bg-amber-600'
+                }`}
             >
-              <Play className="w-4 h-4 mr-2" />
-              Run Code
+              {isRunning ? (
+                <>
+                  <Zap className="w-4 h-4 mr-2 animate-spin" />
+                  Running...
+                </>
+              ) : (
+                <>
+                  <Play className="w-4 h-4 mr-2" />
+                  Run Code
+                </>
+              )}
             </button>
             <button
               onClick={handleSubmit}
@@ -349,6 +364,7 @@ const Coding = () => {
             <div className="prose prose-invert prose-amber mb-6">
               <p className="text-gray-300">{currentQuestion?.description}</p>
             </div>
+
 
             <div className="space-y-4">
               <h3 className="text-lg font-semibold text-white">Examples:</h3>
