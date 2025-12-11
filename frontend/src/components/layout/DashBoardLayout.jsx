@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Code, Mic, FileText, LogOut, Menu, X, User, Crown, Zap, Star } from "lucide-react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
-import ProfileDropdown from "./ProfiileDropdown";
+import ProfileDropdown from "./ProfileDropdown";
 
 const NavigationItem = ({ item, isActive, onClick, isCollapsed }) => {
   const Icon = item.icon;

@@ -2,7 +2,6 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { connectDB } from "./config/db.js";
-import question from "./models/questionModels.js";
 import authRoutes from "./routes/auth.js";
 import interviewRoutes from "./routes/interviews.js";
 import questionRoutes from "./routes/questions.js";

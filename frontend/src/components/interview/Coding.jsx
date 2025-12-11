@@ -1,11 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
 import { oneDark } from '@codemirror/theme-one-dark';
-import { Play, Check, Clock, AlertCircle, ArrowRight, Zap, Code, User } from 'lucide-react';
+import { Play, Check, Clock, AlertCircle, ArrowRight, Zap, Code, User, Save, Maximize2, Minimize2 } from 'lucide-react';
 import axiosInstance from '../../utils/axiosInstance';
 import { API_PATHS } from '../../utils/apiPaths';
 import { useNavigate } from 'react-router-dom';
+import debounce from 'lodash/debounce';
 
 const Coding = () => {
   const navigate = useNavigate();
@@ -20,18 +21,20 @@ const Coding = () => {
   const [interviewId, setInterviewId] = useState(null);
 
   // State for loading and timing
-  const [isLoading, setIsLoading] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [isRunning, setIsRunning] = useState(false)
+  const [status, setStatus] = useState('idle'); // 'idle', 'loading', 'running', 'submitting', 'evaluating'
   const [timeElapsed, setTimeElapsed] = useState(0);
+  const [isEditorFullscreen, setIsEditorFullscreen] = useState(false);
+
+  // Refs
+  const codeWorkerRef = useRef(null);
+  const autoSaveTimeoutRef = useRef(null);
 
   // --- Interview Logic ---
 
   const startInterview = async () => {
-    setIsLoading(true);
+    setStatus('loading');
     try {
       // 1. GENERATE QUESTION FROM AI
-      // You can make these variables dynamic based on user selection later
       const generateResponse = await axiosInstance.post(API_PATHS.QUESTIONS.GENERATE, {
         difficulty: 'Medium',
         topic: 'Arrays'
@@ -51,26 +54,91 @@ const Coding = () => {
 
       setInterviewId(trackResponse.data.data._id);
       setCurrentQuestion(newQuestion);
-      setCode(newQuestion.starterCode || `// Write your solution for: ${newQuestion.title}\n\nfunction solution() {\n  \n}`);
+
+      // Try to load saved code first
+      const savedCode = localStorage.getItem(`code_${newQuestion._id}`);
+      const initialCode = savedCode || newQuestion.starterCode ||
+        `// Write your solution for: ${newQuestion?.title || 'Problem'}\n\nfunction solution() {\n  // Your code here\n\n};`;
+
+      setCode(initialCode);
       setInterviewStarted(true);
-      setTimeElapsed(0); // Reset time when starting
+      setTimeElapsed(0);
       setResults(null);
+      setStatus('idle');
 
     } catch (error) {
       console.error('Error starting interview:', error);
-      if (error.response?.status === 400) {
+
+      // Prefer backend-provided message when available
+      const backendMsg = error?.response?.data?.message || error?.response?.data || error?.message;
+
+      // 429 = rate limit / quota exceeded (e.g. Gemini quota)
+      if (error.response?.status === 429) {
+        alert(`Service rate limit reached: ${backendMsg || 'Please try again later or check your API quota.'}`);
+        navigate('/dashboard');
+      } else if (error.response?.status === 400) {
+        // existing weekly limit handling
         alert('Weekly coding interview limit reached (2 per week)! Upgrade to Premium.');
         navigate('/dashboard');
+      } else if (error.response?.status === 500) {
+        // Server internal error — surface message and load a local fallback question so user can continue
+        alert(`Server Error: ${backendMsg || 'Please try again later.'}\nA local demo question will be loaded so you can continue.`);
+
+        const fallbackQuestion = {
+          _id: 'local_demo',
+          title: 'Two Sum (Demo)',
+          description: 'Given an array of integers nums and an integer target, return indices of the two numbers such that they add up to target.',
+          difficulty: 'Easy',
+          starterCode: `// Write your solution for: Two Sum\n\nfunction solution(nums, target) {\n  // Your code here\n\n  const map = new Map();\n  for (let i = 0; i < nums.length; i++) {\n    const complement = target - nums[i];\n    if (map.has(complement)) return [map.get(complement), i];\n    map.set(nums[i], i);\n  }\n  return [];\n}\n`,
+          testCases: [
+            { input: "[2,7,11,15], 9", output: "[0,1]" },
+            { input: "[3,2,4], 6", output: "[1,2]" },
+            { input: "[3,3], 6", output: "[0,1]" }
+          ],
+          examples: [
+            { input: "[2,7,11,15], 9", output: "[0,1]", explanation: "2 + 7 = 9" }
+          ],
+          hints: ['Use a hash map to store seen values and indices.']
+        };
+
+        // Load saved code if available, otherwise use starterCode
+        const savedCodeDemo = localStorage.getItem(`code_${fallbackQuestion._id}`);
+        const initialDemoCode = savedCodeDemo || fallbackQuestion.starterCode ||
+          `// Write your solution for: ${fallbackQuestion.title}\n\nfunction solution() {\n  // Your code here\n\n};`;
+
+        setInterviewId(null);
+        setCurrentQuestion(fallbackQuestion);
+        setCode(initialDemoCode);
+        setInterviewStarted(true);
+        setTimeElapsed(0);
+        setResults(null);
+        setStatus('idle');
+
       } else {
-        alert('Error starting interview. Check backend status.');
+        alert(`Error starting interview. ${backendMsg ? ('Details: ' + backendMsg) : 'Check backend status.'}`);
+        setStatus('idle');
       }
-    } finally {
-      setIsLoading(false);
+    }
+  };
+
+  const saveCode = React.useMemo(
+    () =>
+      debounce((codeToSave, questionId) => {
+        if (questionId) {
+          localStorage.setItem(`code_${questionId}`, codeToSave);
+        }
+      }, 1000),
+    []
+  );
+
+  const handleCodeChange = (newCode) => {
+    setCode(newCode);
+    if (currentQuestion) {
+      saveCode(newCode, currentQuestion._id);
     }
   };
 
   // --- Timer ---
-
   useEffect(() => {
     let timer;
     if (interviewStarted) {
@@ -78,7 +146,14 @@ const Coding = () => {
         setTimeElapsed(prev => prev + 1);
       }, 1000);
     }
-    return () => clearInterval(timer);
+
+    // Capture the ref value inside the effect
+    const currentTimeout = autoSaveTimeoutRef.current;
+
+    return () => {
+      if (timer) clearInterval(timer);
+      if (currentTimeout) clearTimeout(currentTimeout);
+    };
   }, [interviewStarted]);
 
   const formatTime = (seconds) => {
@@ -87,139 +162,195 @@ const Coding = () => {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // --- Code Execution (Mock) ---
 
-  // --- Code Execution (Mock) ---
 
-  const handleRunCode = async () => { // Make async to handle UI delay
-    if (!currentQuestion) return;
-
-    console.log("🚀 Run Code clicked. Compiling..."); // Debug log
-    setIsRunning(true); // Start loading spinner
-    setResults(null);   // Clear previous results briefly to show a "refresh"
-
-    // standard execution logic wrapped in a promise to allow UI update
-    await new Promise(resolve => setTimeout(resolve, 600));
+  // --- Safe Code Execution using Web Worker ---
+  const executeUserCode = async () => {
+    if (!currentQuestion) return null;
 
     try {
-      const starterCode = currentQuestion.starterCode || '';
-      const funcNameMatch = starterCode.match(/function\s+(\w+)/);
-      const funcName = funcNameMatch ? funcNameMatch[1] : 'solution';
-      const argsMatch = starterCode.match(/\(([^)]*)\)/);
-      const args = argsMatch ? argsMatch[1] : '';
-
-      console.log("📝 Function Name:", funcName);
-
-      // eslint-disable-next-line no-new-func
-      const userFunction = new Function(
-        `return function ${funcName}(${args}) { ${code} return ${funcName}(${args}); }`
-      )();
+      // Create or reuse worker
+      if (!codeWorkerRef.current) {
+        codeWorkerRef.current = new Worker(new URL('./codeWorker.js', import.meta.url));
+      }
 
       const testCases = currentQuestion.testCases || [];
 
-      const testResults = testCases.map((testCase, index) => {
-        try {
-          let parsedArgs;
-          try {
-            if (testCase.input.startsWith('[')) {
-              parsedArgs = JSON.parse(`[${testCase.input}]`);
-            } else {
-              const cleanedInput = testCase.input.replace(/\w+\s*=\s*/g, '');
-              parsedArgs = JSON.parse(`[${cleanedInput}]`);
-            }
-          } catch (e) {
-            console.warn("Could not parse args automatically", testCase.input);
-            parsedArgs = [];
-          }
+      return new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          codeWorkerRef.current.terminate();
+          codeWorkerRef.current = null;
+          reject(new Error('Execution timeout (5 seconds exceeded)'));
+        }, 5000);
 
-          const result = userFunction(...parsedArgs);
+        codeWorkerRef.current.onmessage = (event) => {
+          clearTimeout(timeoutId);
+          resolve(event.data);
+        };
 
-          console.log(`Test ${index + 1}: Expected ${testCase.output} vs Got ${result}`); // Debug log
+        codeWorkerRef.current.onerror = (error) => {
+          clearTimeout(timeoutId);
+          codeWorkerRef.current.terminate();
+          codeWorkerRef.current = null;
+          reject(error);
+        };
 
-          const passed = JSON.stringify(result) === JSON.stringify(testCase.output) ||
-            String(result) === String(testCase.output);
-
-          return {
-            testCase: index + 1,
-            input: testCase.input,
-            expected: typeof testCase.output === 'object' ? JSON.stringify(testCase.output) : testCase.output,
-            output: typeof result === 'object' ? JSON.stringify(result) : String(result),
-            passed
-          };
-        } catch (error) {
-          return {
-            testCase: index + 1,
-            input: testCase.input,
-            expected: String(testCase.output),
-            output: 'Runtime Error: ' + error.message,
-            passed: false
-          };
-        }
+        codeWorkerRef.current.postMessage({
+          code,
+          testCases,
+          funcName: 'solution'
+        });
       });
+
+    } catch (error) {
+      throw error;
+    }
+  };
+
+  // --- Button: Run Code ---
+  // --- Button: Run Code ---
+  const handleRunCode = async () => {
+    if (!currentQuestion) return;
+
+    console.log("🚀 Run Code clicked...");
+    setStatus('running');
+    setResults(null);
+
+    // Small delay to allow UI to update to 'running' state
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    try {
+      const executionData = await executeUserCode();
+
+      // 🚨 CRITICAL FIX: Check if the worker crashed silently
+      if (executionData.error) {
+        console.error("❌ Worker Error:", executionData.error);
+        setResults({
+          type: 'error',
+          message: executionData.error // This will now show on screen!
+        });
+        setStatus('idle');
+        return;
+      }
+
+      const { testResults, allPassed } = executionData;
 
       setResults({
         type: 'test',
         data: testResults,
-        passed: testResults.length > 0 && testResults.every(test => test.passed)
+        passed: allPassed
       });
-
-      console.log("✅ Execution Complete. Results updated.");
+      console.log("✅ Execution Complete");
 
     } catch (error) {
       console.error("❌ Runtime Error:", error);
       setResults({
         type: 'error',
-        message: 'Code compilation failed: ' + error.message
+        message: error.message || 'Code execution failed'
       });
     } finally {
-      setIsRunning(false); // Stop loading spinner
+      setStatus('idle');
     }
   };
 
-
-  // --- Submission (Mock AI Evaluation) ---
-
+  // --- Button: Submit Solution ---
   const handleSubmit = async () => {
-    setIsSubmitting(true);
+    setStatus('submitting');
     try {
-      // 1. Run final tests (optional)
-      handleRunCode();
+      // 1. Run the code
+      let executionData;
+      try {
+        executionData = await executeUserCode();
+      } catch (err) {
+        alert(`Fix your code errors before submitting!\nError: ${err.message}`);
+        setStatus('idle');
+        return;
+      }
 
-      // 2. Simulate AI evaluation 
+      const { testResults, allPassed } = executionData;
+
+      // 2. Calculate REAL Score
+      const totalTests = testResults.length;
+      const passedTests = testResults.filter(t => t.passed).length;
+      const calculatedScore = totalTests === 0 ? 0 : Math.round((passedTests / totalTests) * 100);
+
+      // 3. Generate detailed feedback
       const evaluation = {
-        score: Math.floor(Math.random() * 30) + 70,
+        score: calculatedScore,
         feedback: {
-          correctness: results?.passed ? 'Solution is logically correct.' : 'Failed some test cases.',
-          efficiency: 'O(n) Time Complexity - Excellent',
-          codeQuality: 'Clean and readable code',
-          improvements: ['Consider edge cases like empty input array.']
+          correctness: allPassed
+            ? 'Perfect! All test cases passed.'
+            : `You passed ${passedTests} out of ${totalTests} test cases.`,
+          efficiency: testResults.length > 0 ? 'Consider time and space complexity.' : 'No tests to evaluate.',
+          codeQuality: 'Review your code for clarity and maintainability.',
+          suggestions: passedTests < totalTests ? [
+            'Check edge cases',
+            'Review problem constraints',
+            'Test with custom inputs'
+          ] : ['Great job! Consider optimizing for larger inputs.']
         },
         detailedAnalysis: {
-          timeComplexity: 'O(n)',
-          spaceComplexity: 'O(n)',
-          approach: 'Hash Map',
-          rating: results?.passed ? 4.5 : 3.0
+          timeComplexity: 'Analyze your algorithm\'s Big O',
+          spaceComplexity: 'Consider memory usage',
+          rating: allPassed ? 5 : Math.max(1, Math.floor(passedTests / totalTests * 5)),
+          passedTests,
+          totalTests
         }
       };
 
+      // Show the Evaluation Panel
       setResults({ type: 'evaluation', data: evaluation });
 
-      // 3. Mark interview as completed 
+      // 4. Save to Backend
       if (interviewId) {
         await axiosInstance.put(API_PATHS.INTERVIEWS.COMPLETE.replace(':id', interviewId), {
           score: evaluation.score,
           feedback: evaluation,
-          duration: timeElapsed
+          duration: timeElapsed,
+          codeSubmitted: code
         });
+      }
+
+      // 5. Clear saved code
+      if (currentQuestion) {
+        localStorage.removeItem(`code_${currentQuestion._id}`);
       }
 
     } catch (error) {
       console.error('Submission error:', error);
-      alert('Submission failed. Please check network.');
+      alert('Submission failed. Please check network and try again.');
     } finally {
-      setIsSubmitting(false);
+      setStatus('idle');
     }
   };
+
+  // --- Keyboard Shortcuts ---
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        if (interviewStarted && status === 'idle') {
+          handleRunCode();
+        }
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        saveCode(code);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [interviewStarted, status, code, handleRunCode]);
+
+  // --- Cleanup ---
+  useEffect(() => {
+    return () => {
+      if (codeWorkerRef.current) {
+        codeWorkerRef.current.terminate();
+      }
+    };
+  }, []);
 
   // --- Conditional Renders ---
 
@@ -277,10 +408,10 @@ const Coding = () => {
             </button>
             <button
               onClick={startInterview}
-              disabled={isLoading}
+              disabled={status === 'loading'}
               className="flex-1 px-6 py-4 bg-amber-500 text-white rounded-xl font-semibold hover:bg-amber-600 disabled:opacity-50 transition-colors flex items-center justify-center"
             >
-              {isLoading ? (
+              {status === 'loading' ? (
                 <>
                   <Zap className="w-5 h-5 mr-2 animate-spin" />
                   Generating...
@@ -300,7 +431,7 @@ const Coding = () => {
 
   // Interview Screen
   return (
-    <div className="h-screen flex flex-col bg-gray-900 text-white">
+    <div className={`h - screen flex flex-col bg-gray-900 text-white ${isEditorFullscreen ? 'fixed inset-0 z-50' : ''}`}>
       {/* Header */}
       <div className="bg-gray-800 border-b border-gray-700 px-6 py-4">
         <div className="flex items-center justify-between">
@@ -315,15 +446,31 @@ const Coding = () => {
               }`}>
               {currentQuestion?.difficulty}
             </div>
+            <button
+              onClick={() => saveCode(code)}
+              className="flex items-center text-sm text-gray-400 hover:text-white"
+              title="Save code (Ctrl+S)"
+            >
+              <Save className="w-4 h-4 mr-1" />
+              Saved
+            </button>
           </div>
           <div className="flex items-center space-x-3">
             <button
-              onClick={handleRunCode}
-              disabled={isRunning || isSubmitting} // Disable while running
-              className={`flex items-center px-4 py-2 rounded-lg font-semibold transition-colors ${isRunning ? 'bg-amber-600 cursor-not-allowed' : 'bg-amber-500 hover:bg-amber-600'
-                }`}
+              onClick={() => setIsEditorFullscreen(!isEditorFullscreen)}
+              className="flex items-center px-3 py-2 text-gray-300 hover:text-white"
+              title={isEditorFullscreen ? "Exit Fullscreen" : "Fullscreen"}
             >
-              {isRunning ? (
+              {isEditorFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+            </button>
+            <button
+              onClick={handleRunCode}
+              disabled={status !== 'idle'}
+              className={`flex items-center px-4 py-2 rounded-lg font-semibold transition-colors ${status === 'running' ? 'bg-amber-600 cursor-not-allowed' : 'bg-amber-500 hover:bg-amber-600'
+                }`}
+              title="Run Code (Ctrl+Enter)"
+            >
+              {status === 'running' ? (
                 <>
                   <Zap className="w-4 h-4 mr-2 animate-spin" />
                   Running...
@@ -337,10 +484,10 @@ const Coding = () => {
             </button>
             <button
               onClick={handleSubmit}
-              disabled={isSubmitting}
+              disabled={status !== 'idle'}
               className="flex items-center px-4 py-2 bg-green-600 rounded-lg font-semibold hover:bg-green-700 disabled:opacity-50 transition-colors"
             >
-              {isSubmitting ? (
+              {status === 'submitting' ? (
                 <>
                   <Zap className="w-4 h-4 mr-2 animate-spin" />
                   Evaluating...
@@ -358,13 +505,12 @@ const Coding = () => {
 
       <div className="flex-1 flex overflow-hidden">
         {/* Question Panel */}
-        <div className="w-1/3 bg-gray-800 border-r border-gray-700 overflow-auto">
+        <div className={`${isEditorFullscreen ? 'hidden' : 'w-1/3'} bg-gray-800 border-r border-gray-700 overflow-auto`}>
           <div className="p-6">
             <h2 className="text-2xl font-bold mb-4 text-white">{currentQuestion?.title}</h2>
             <div className="prose prose-invert prose-amber mb-6">
               <p className="text-gray-300">{currentQuestion?.description}</p>
             </div>
-
 
             <div className="space-y-4">
               <h3 className="text-lg font-semibold text-white">Examples:</h3>
@@ -372,11 +518,15 @@ const Coding = () => {
                 <div key={index} className="bg-gray-700 rounded-lg p-4">
                   <div className="mb-2">
                     <strong className="text-gray-200">Input:</strong>
-                    <div className="text-sm text-gray-300 mt-1 font-mono">{example.input}</div>
+                    <div className="text-sm text-gray-300 mt-1 font-mono bg-gray-900 p-2 rounded">
+                      {example.input}
+                    </div>
                   </div>
                   <div className="mb-2">
                     <strong className="text-gray-200">Output:</strong>
-                    <div className="text-sm text-gray-300 mt-1 font-mono">{example.output}</div>
+                    <div className="text-sm text-gray-300 mt-1 font-mono bg-gray-900 p-2 rounded">
+                      {example.output}
+                    </div>
                   </div>
                   <div>
                     <strong className="text-gray-200">Explanation:</strong>
@@ -403,102 +553,131 @@ const Coding = () => {
         </div>
 
         {/* Code Editor */}
-        <div className="flex-1 flex flex-col">
+        <div className={`flex - 1 flex flex-col ${isEditorFullscreen ? 'w-full' : ''}`}>
           <CodeMirror
             value={code}
             height="100%"
             theme={oneDark}
             extensions={[javascript()]}
-            onChange={(value) => setCode(value)}
+            onChange={handleCodeChange}
             basicSetup={{
               lineNumbers: true,
               highlightActiveLine: true,
               highlightSelectionMatches: true,
+              bracketMatching: true,
+              closeBrackets: true,
+              autocompletion: true,
+              indentOnInput: true,
+              syntaxHighlighting: true,
             }}
           />
         </div>
 
         {/* Results Panel */}
-        {results && (
-          <div className="w-1/3 bg-gray-800 border-l border-gray-700 overflow-auto">
-            <div className="p-6">
-              <h3 className="text-lg font-semibold mb-4 text-white">
-                {results.type === 'test' ? 'Test Results' : 'AI Evaluation'}
-              </h3>
+        {
+          results && (
+            <div className={`${isEditorFullscreen ? 'hidden' : 'w-1/3'} bg-gray-800 border-l border-gray-700 overflow-auto`}>
+              <div className="p-6">
+                <h3 className="text-lg font-semibold mb-4 text-white">
+                  {results.type === 'test' ? 'Test Results' :
+                    results.type === 'error' ? 'Execution Error' : 'AI Evaluation'}
+                </h3>
 
-              {results.type === 'test' && (
-                <div className="space-y-3">
-                  {results.data.map((test, index) => (
-                    <div key={index} className={`p-3 rounded-lg ${test.passed ? 'bg-green-900/50 border border-green-500' : 'bg-red-900/50 border border-red-500'
-                      }`}>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="font-medium text-white">Test Case {test.testCase}</span>
-                        {test.passed ? (
-                          <Check className="w-4 h-4 text-green-400" />
-                        ) : (
-                          <AlertCircle className="w-4 h-4 text-red-400" />
-                        )}
-                      </div>
-                      <div className="text-sm space-y-1 text-gray-300">
-                        <div><strong>Input:</strong> {test.input}</div>
-                        <div><strong>Expected:</strong> {test.expected}</div>
-                        <div><strong>Output:</strong> {test.output}</div>
-                      </div>
-                    </div>
-                  ))}
-                  <div className={`p-3 rounded-lg ${results.passed ? 'bg-green-900/50 border border-green-500' : 'bg-red-900/50 border border-red-500'
-                    }`}>
-                    <div className="text-center font-semibold text-white">
-                      {results.passed ? 'All test cases passed! Ready to submit.' : 'Some test cases failed.'}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {results.type === 'evaluation' && (
-                <div className="space-y-4">
-                  <div className="text-center">
-                    <div className="text-3xl font-bold text-amber-400 mb-2">
-                      Score: {results.data.score}%
-                    </div>
-                    <div className="text-lg text-gray-300">AI Evaluation Complete</div>
-                  </div>
-
+                {results.type === 'test' && (
                   <div className="space-y-3">
-                    <div className="bg-gray-700 rounded-lg p-4">
-                      <h4 className="font-semibold mb-2 text-white">Feedback</h4>
-                      <div className="text-sm space-y-2 text-gray-300">
-                        <div><strong>Correctness:</strong> {results.data.feedback.correctness}</div>
-                        <div><strong>Efficiency:</strong> {results.data.feedback.efficiency}</div>
-                        <div><strong>Code Quality:</strong> {results.data.feedback.codeQuality}</div>
+                    {results.data.map((test, index) => (
+                      <div key={index} className={`p-3 rounded-lg ${test.passed ? 'bg-green-900/50 border border-green-500' : 'bg-red-900/50 border border-red-500'
+                        }`}>
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="font-medium text-white">Test Case {test.testCase}</span>
+                          {test.passed ? (
+                            <Check className="w-4 h-4 text-green-400" />
+                          ) : (
+                            <AlertCircle className="w-4 h-4 text-red-400" />
+                          )}
+                        </div>
+                        <div className="text-sm space-y-1 text-gray-300">
+                          <div><strong>Input:</strong> <code className="bg-gray-900 px-1 rounded">{test.input}</code></div>
+                          <div><strong>Expected:</strong> <code className="bg-gray-900 px-1 rounded">{test.expected}</code></div>
+                          <div><strong>Output:</strong> <code className="bg-gray-900 px-1 rounded">{test.output}</code></div>
+                        </div>
+                      </div>
+                    ))}
+                    <div className={`p-3 rounded-lg ${results.passed ? 'bg-green-900/50 border border-green-500' : 'bg-red-900/50 border border-red-500'
+                      }`}>
+                      <div className="text-center font-semibold text-white">
+                        {results.passed ? '🎉 All test cases passed! Ready to submit.' : '⚠ Some test cases failed.'}
                       </div>
                     </div>
-
-                    <div className="bg-gray-700 rounded-lg p-4">
-                      <h4 className="font-semibold mb-2 text-white">Technical Analysis</h4>
-                      <div className="text-sm space-y-1 text-gray-300">
-                        <div><strong>Time Complexity:</strong> {results.data.detailedAnalysis.timeComplexity}</div>
-                        <div><strong>Space Complexity:</strong> {results.data.detailedAnalysis.spaceComplexity}</div>
-                        <div><strong>Approach:</strong> {results.data.detailedAnalysis.approach}</div>
-                        <div><strong>Rating:</strong> {results.data.detailedAnalysis.rating}/5</div>
-                      </div>
-                    </div>
-
-                    <button
-                      onClick={() => navigate('/dashboard')}
-                      className="w-full flex items-center justify-center px-4 py-2 bg-amber-500 rounded-lg font-semibold hover:bg-amber-600 transition-colors"
-                    >
-                      Return to Dashboard
-                      <ArrowRight className="w-4 h-4 ml-2" />
-                    </button>
                   </div>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
+                )}
+
+                {results.type === 'error' && (
+                  <div className="p-4 bg-red-900/50 border border-red-500 rounded-lg">
+                    <div className="flex items-center mb-2">
+                      <AlertCircle className="w-5 h-5 text-red-400 mr-2" />
+                      <span className="font-semibold text-white">Execution Error</span>
+                    </div>
+                    <div className="text-sm text-gray-300 font-mono bg-gray-900 p-3 rounded">
+                      {results.message}
+                    </div>
+                  </div>
+                )}
+
+                {results.type === 'evaluation' && (
+                  <div className="space-y-4">
+                    <div className="text-center">
+                      <div className="text-3xl font-bold text-amber-400 mb-2">
+                        Score: {results.data.score}%
+                      </div>
+                      <div className="text-lg text-gray-300">AI Evaluation Complete</div>
+                    </div>
+
+                    <div className="space-y-3">
+                      <div className="bg-gray-700 rounded-lg p-4">
+                        <h4 className="font-semibold mb-2 text-white">Feedback</h4>
+                        <div className="text-sm space-y-2 text-gray-300">
+                          <div><strong>Correctness:</strong> {results.data.feedback.correctness}</div>
+                          <div><strong>Efficiency:</strong> {results.data.feedback.efficiency}</div>
+                          <div><strong>Code Quality:</strong> {results.data.feedback.codeQuality}</div>
+                          {results.data.feedback.suggestions && (
+                            <div>
+                              <strong>Suggestions:</strong>
+                              <ul className="mt-1 ml-4 list-disc">
+                                {results.data.feedback.suggestions.map((suggestion, idx) => (
+                                  <li key={idx}>{suggestion}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="bg-gray-700 rounded-lg p-4">
+                        <h4 className="font-semibold mb-2 text-white">Technical Analysis</h4>
+                        <div className="text-sm space-y-1 text-gray-300">
+                          <div><strong>Time Complexity:</strong> {results.data.detailedAnalysis.timeComplexity}</div>
+                          <div><strong>Space Complexity:</strong> {results.data.detailedAnalysis.spaceComplexity}</div>
+                          <div><strong>Tests Passed:</strong> {results.data.detailedAnalysis.passedTests}/{results.data.detailedAnalysis.totalTests}</div>
+                          <div><strong>Rating:</strong> {results.data.detailedAnalysis.rating}/5</div>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => navigate('/dashboard')}
+                        className="w-full flex items-center justify-center px-4 py-2 bg-amber-500 rounded-lg font-semibold hover:bg-amber-600 transition-colors"
+                      >
+                        Return to Dashboard
+                        <ArrowRight className="w-4 h-4 ml-2" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div >
+          )}
+      </div >
+    </div >
   );
 };
 

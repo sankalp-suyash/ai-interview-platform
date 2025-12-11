@@ -11,7 +11,6 @@ import Profile from "./pages/Profile.jsx";
 import ProtectedRoute from "./components/auth/ProtectedRoute.jsx";
 import LandingPage from "./pages/LandingPage/LandingPage.jsx";
 
-
 function App() {
   return (
     <AuthProvider>
